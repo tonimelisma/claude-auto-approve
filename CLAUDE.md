@@ -46,10 +46,12 @@ echo '{"tool_input":{"command":"rm -rf /"}}' | ./auto-approve-safe.sh
 
 ## Deployment Workflow
 
-After any code change, always:
+**MANDATORY: Complete ALL steps after EVERY code change. Do NOT stop to ask for confirmation -- just do them all.**
+
 1. Copy API keys from the installed version (`~/.claude/hooks/auto-approve-safe.sh`) into the dev copy
 2. Test the dev copy works (safe command -> approve, dangerous command -> no output)
-3. Install the dev copy to `~/.claude/hooks/auto-approve-safe.sh` (overwriting it)
-4. `git push`
+3. Strip API keys back to placeholders in the dev copy (for safe git commit)
+4. Install the dev copy to `~/.claude/hooks/auto-approve-safe.sh` with real keys substituted (e.g. via `sed`)
+5. Commit and `git push`
 
 **Never** copy on top of the installed version before testing -- that would overwrite the real API keys.
