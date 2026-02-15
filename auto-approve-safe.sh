@@ -1,13 +1,13 @@
 #!/bin/bash
 set -uo pipefail
 
-LOG="/tmp/auto-approve-safe.log"
-COOLOFF_DIR="/tmp/auto-approve-cooloff"
+DATA_DIR="$HOME/.claude/auto-approve"
+COOLOFF_DIR="$DATA_DIR/cooloff"
 COOLOFF_SECONDS=1800  # 30 minutes
-USAGE_LOG="/tmp/auto-approve-usage.log"
-USAGE_TOTALS="/tmp/auto-approve-usage-totals"
+USAGE_LOG="$DATA_DIR/usage.log"
+TOTALS_DIR="$DATA_DIR/totals"
 
-mkdir -p "$COOLOFF_DIR"
+mkdir -p "$COOLOFF_DIR" "$TOTALS_DIR"
 
 INPUT=$(cat)
 
@@ -35,40 +35,39 @@ set_cooloff() {
 
 update_usage_stats() {
   (
-    local PROVIDER=$1 MODEL=$2 PROMPT_TOK=$3 COMPLETION_TOK=$4 TOTAL_TOK=$5 INPUT_COST=$6 OUTPUT_COST=$7
-
-    # Per-call cost: (prompt_tokens * input_cost + completion_tokens * output_cost) / 1_000_000
-    local CALL_COST
-    CALL_COST=$(awk "BEGIN { printf \"%.6f\", ($PROMPT_TOK * $INPUT_COST + $COMPLETION_TOK * $OUTPUT_COST) / 1000000 }")
+    local PROVIDER=$1 MODEL=$2 PROMPT_TOK=$3 COMPLETION_TOK=$4 INPUT_COST=$5 OUTPUT_COST=$6 DECISION=$7 COMMAND=$8
 
     # Append to per-call usage log
-    echo "$(date '+%Y-%m-%dT%H:%M:%S') $PROVIDER $MODEL prompt=$PROMPT_TOK completion=$COMPLETION_TOK total=$TOTAL_TOK cost=\$$CALL_COST" >> "$USAGE_LOG"
+    echo "$(date '+%Y-%m-%dT%H:%M:%S') provider=$PROVIDER model=$MODEL prompt_tokens=$PROMPT_TOK completion_tokens=$COMPLETION_TOK decision=$DECISION command=\"$COMMAND\"" >> "$USAGE_LOG"
 
-    # Update running totals atomically
-    local PREV_CALLS=0 PREV_PROMPT=0 PREV_COMPLETION=0 PREV_COST="0.000000"
-    if [ -f "$USAGE_TOTALS" ]; then
+    # Update per-provider totals
+    local TOTALS_FILE="$TOTALS_DIR/$PROVIDER"
+    local PREV_CALLS=0 PREV_PROMPT=0 PREV_COMPLETION=0 PREV_COST="0.00"
+    if [ -f "$TOTALS_FILE" ]; then
       # shellcheck disable=SC1090
-      source "$USAGE_TOTALS"
-      PREV_CALLS=${TOTAL_CALLS:-0}
-      PREV_PROMPT=${TOTAL_PROMPT_TOKENS:-0}
-      PREV_COMPLETION=${TOTAL_COMPLETION_TOKENS:-0}
-      PREV_COST=${TOTAL_COST_USD:-0.000000}
+      source "$TOTALS_FILE"
+      PREV_CALLS=${CALLS:-0}
+      PREV_PROMPT=${PROMPT_TOKENS:-0}
+      PREV_COMPLETION=${COMPLETION_TOKENS:-0}
+      PREV_COST=${COST_USD:-0.00}
     fi
 
     local NEW_CALLS=$(( PREV_CALLS + 1 ))
     local NEW_PROMPT=$(( PREV_PROMPT + PROMPT_TOK ))
     local NEW_COMPLETION=$(( PREV_COMPLETION + COMPLETION_TOK ))
+    local CALL_COST
+    CALL_COST=$(awk "BEGIN { printf \"%.2f\", ($PROMPT_TOK * $INPUT_COST + $COMPLETION_TOK * $OUTPUT_COST) / 1000000 }")
     local NEW_COST
-    NEW_COST=$(awk "BEGIN { printf \"%.6f\", $PREV_COST + $CALL_COST }")
+    NEW_COST=$(awk "BEGIN { printf \"%.2f\", $PREV_COST + $CALL_COST }")
 
-    local TMPFILE="${USAGE_TOTALS}.tmp.$$"
+    local TMPFILE="${TOTALS_FILE}.tmp.$$"
     cat > "$TMPFILE" <<EOF
-TOTAL_CALLS=$NEW_CALLS
-TOTAL_PROMPT_TOKENS=$NEW_PROMPT
-TOTAL_COMPLETION_TOKENS=$NEW_COMPLETION
-TOTAL_COST_USD=$NEW_COST
+CALLS=$NEW_CALLS
+PROMPT_TOKENS=$NEW_PROMPT
+COMPLETION_TOKENS=$NEW_COMPLETION
+COST_USD=$NEW_COST
 EOF
-    mv "$TMPFILE" "$USAGE_TOTALS"
+    mv "$TMPFILE" "$TOTALS_FILE"
   ) 2>/dev/null || true
 }
 
@@ -92,11 +91,8 @@ classify() {
 
   TOOL_INPUT=$(echo "$INPUT" | jq -r '.tool_input.command')
   if [ $? -ne 0 ] || [ -z "$TOOL_INPUT" ]; then
-    echo "jq failed or empty command" >>"$LOG"
     return 1
   fi
-
-  echo "$(date '+%H:%M:%S') classifying: $TOOL_INPUT" >>"$LOG"
 
   PROMPT="Analyze the following bash command.
 
@@ -121,7 +117,6 @@ Reply with exactly one word: YES or NO"
     IFS='|' read -r NAME URL KEY MODEL INPUT_COST OUTPUT_COST <<< "$ENTRY"
 
     if is_cooled_off "$NAME"; then
-      echo "  $NAME: skipped (cooloff)" >>"$LOG"
       continue
     fi
 
@@ -130,7 +125,6 @@ Reply with exactly one word: YES or NO"
     local EXIT_CODE=$?
 
     if [ $EXIT_CODE -ne 0 ] || [ -z "$RESPONSE" ]; then
-      echo "  $NAME: timeout/error" >>"$LOG"
       continue
     fi
 
@@ -138,10 +132,8 @@ Reply with exactly one word: YES or NO"
     if echo "$RESPONSE" | jq -e '.error' >/dev/null 2>&1; then
       local ERROR_MSG
       ERROR_MSG=$(echo "$RESPONSE" | jq -r '.error.message // .error // empty' 2>/dev/null)
-      echo "  $NAME: error: $ERROR_MSG" >>"$LOG"
       if echo "$ERROR_MSG" | grep -qi "rate limit"; then
         set_cooloff "$NAME"
-        echo "  $NAME: cooloff set for ${COOLOFF_SECONDS}s" >>"$LOG"
       fi
       continue
     fi
@@ -150,32 +142,24 @@ Reply with exactly one word: YES or NO"
     CONTENT=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
 
     # Extract token usage
-    local PROMPT_TOKENS COMPLETION_TOKENS TOTAL_TOKENS
-    read -r PROMPT_TOKENS COMPLETION_TOKENS TOTAL_TOKENS <<< \
-      $(echo "$RESPONSE" | jq -r '[.usage.prompt_tokens // 0, .usage.completion_tokens // 0, .usage.total_tokens // 0] | @tsv' 2>/dev/null) \
-      || { PROMPT_TOKENS=0; COMPLETION_TOKENS=0; TOTAL_TOKENS=0; }
-
-    local CALL_COST
-    CALL_COST=$(awk "BEGIN { printf \"%.6f\", ($PROMPT_TOKENS * $INPUT_COST + $COMPLETION_TOKENS * $OUTPUT_COST) / 1000000 }" 2>/dev/null) || CALL_COST="0.000000"
-
-    echo "  $NAME said: $CONTENT (prompt=$PROMPT_TOKENS completion=$COMPLETION_TOKENS cost=\$$CALL_COST)" >>"$LOG"
-    update_usage_stats "$NAME" "$MODEL" "$PROMPT_TOKENS" "$COMPLETION_TOKENS" "$TOTAL_TOKENS" "$INPUT_COST" "$OUTPUT_COST"
+    local PROMPT_TOKENS COMPLETION_TOKENS
+    read -r PROMPT_TOKENS COMPLETION_TOKENS <<< \
+      $(echo "$RESPONSE" | jq -r '[.usage.prompt_tokens // 0, .usage.completion_tokens // 0] | @tsv' 2>/dev/null) \
+      || { PROMPT_TOKENS=0; COMPLETION_TOKENS=0; }
 
     if echo "$CONTENT" | grep -qiw "NO"; then
-      echo "  -> approve" >>"$LOG"
+      update_usage_stats "$NAME" "$MODEL" "$PROMPT_TOKENS" "$COMPLETION_TOKENS" "$INPUT_COST" "$OUTPUT_COST" "approve" "$TOOL_INPUT"
       echo "approve"
       return 0
     elif echo "$CONTENT" | grep -qiw "YES"; then
-      echo "  -> prompt" >>"$LOG"
+      update_usage_stats "$NAME" "$MODEL" "$PROMPT_TOKENS" "$COMPLETION_TOKENS" "$INPUT_COST" "$OUTPUT_COST" "prompt" "$TOOL_INPUT"
       echo "prompt"
       return 0
     else
-      echo "  $NAME: unrecognized response" >>"$LOG"
       continue
     fi
   done
 
-  echo "  all providers failed" >>"$LOG"
   return 1
 }
 
