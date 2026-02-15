@@ -72,8 +72,8 @@ Reply with exactly one word: YES or NO"
   # Try providers in order, skipping rate-limited ones
   # Replace these with your own API keys and endpoints
   local PROVIDERS=(
-    "moonshot|https://api.moonshot.ai/v1/chat/completions|YOUR_MOONSHOT_API_KEY|kimi-k2.5"
     "opencode|https://opencode.ai/zen/v1/chat/completions|YOUR_OPENCODE_API_KEY|kimi-k2.5-free"
+    "moonshot|https://api.moonshot.ai/v1/chat/completions|YOUR_MOONSHOT_API_KEY|kimi-k2.5"
   )
 
   for ENTRY in "${PROVIDERS[@]}"; do

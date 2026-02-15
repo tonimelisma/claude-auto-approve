@@ -10,8 +10,8 @@ When Claude Code wants to run a Bash command, this hook intercepts the permissio
 
 The script tries multiple API providers in order:
 
-1. **Moonshot** — Kimi K2.5, cheap (~1s latency)
-2. **OpenCode** — Kimi K2.5, free (~1.5s latency)
+1. **OpenCode** — Kimi K2.5, free (~1.5s latency)
+2. **Moonshot** — Kimi K2.5, cheap (~1s latency)
 
 If a provider returns a rate limit error, it enters a 30-minute cooloff period and the next provider is tried.
 
