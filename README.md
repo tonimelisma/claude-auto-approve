@@ -42,15 +42,15 @@ The LLM is asked: "Should a system administrator be warned before running this c
 2. Edit the script and replace the placeholder API keys with your own:
 
    ```bash
-   "moonshot|https://api.moonshot.ai/v1/chat/completions|YOUR_MOONSHOT_API_KEY|kimi-k2.5"
-   "opencode|https://opencode.ai/zen/v1/chat/completions|YOUR_OPENCODE_API_KEY|kimi-k2.5-free"
+   "moonshot|https://api.moonshot.ai/v1/chat/completions|YOUR_MOONSHOT_API_KEY|kimi-k2.5|0.60|3.00"
+   "opencode|https://opencode.ai/zen/v1/chat/completions|YOUR_OPENCODE_API_KEY|kimi-k2.5-free|0|0"
    ```
 
    Get API keys from:
    - **Moonshot**: https://platform.moonshot.ai/ (cheap)
    - **OpenCode**: https://opencode.ai/ (free)
 
-   You can remove providers you don't want or add your own — just follow the `name|url|key|model` format.
+   You can remove providers you don't want or add your own — just follow the `name|url|key|model|input_cost|output_cost` format (costs are USD per million tokens, use `0|0` for free providers).
 
 3. Add the hook to your Claude Code settings (`~/.claude/settings.json`):
 
@@ -80,8 +80,10 @@ The LLM is asked: "Should a system administrator be warned before running this c
 You can add any OpenAI-compatible chat completions API. Add entries to the `PROVIDERS` array in the script:
 
 ```bash
-"name|https://api.example.com/v1/chat/completions|your-api-key|model-name"
+"name|https://api.example.com/v1/chat/completions|your-api-key|model-name|input_cost|output_cost"
 ```
+
+Costs are in USD per million tokens. Use `0|0` for free providers.
 
 The script tries providers in order and uses the first one that succeeds.
 
@@ -91,12 +93,42 @@ All classification decisions are logged to `/tmp/auto-approve-safe.log`:
 
 ```
 20:01:15 classifying: ls /tmp
-  moonshot said: NO
+  moonshot said: NO (prompt=1234 completion=5 cost=$0.000756)
   -> approve
 20:01:21 classifying: rm -rf /srv/data
-  moonshot said: YES
+  moonshot said: YES (prompt=1234 completion=5 cost=$0.000756)
   -> prompt
 ```
+
+## Usage tracking
+
+Every successful API call is logged with token counts and cost estimates.
+
+**Running totals:**
+
+```bash
+cat /tmp/auto-approve-usage-totals
+```
+
+```
+TOTAL_CALLS=42
+TOTAL_PROMPT_TOKENS=5000
+TOTAL_COMPLETION_TOKENS=200
+TOTAL_COST_USD=0.009288
+```
+
+**Per-call detail:**
+
+```bash
+tail -20 /tmp/auto-approve-usage.log
+```
+
+```
+2026-02-14T20:01:15 opencode kimi-k2.5-free prompt=1234 completion=5 total=1239 cost=$0.000000
+2026-02-14T20:01:18 moonshot kimi-k2.5 prompt=1234 completion=5 total=1239 cost=$0.000756
+```
+
+To reset usage stats: `rm /tmp/auto-approve-usage-totals /tmp/auto-approve-usage.log`
 
 ## Testing
 
@@ -118,6 +150,8 @@ echo '{"tool_input":{"command":"rm -rf /"}}' | ~/.claude/hooks/auto-approve-safe
 |----------|---------|-------------|
 | `COOLOFF_SECONDS` | `1800` | How long to skip a rate-limited provider (seconds) |
 | `LOG` | `/tmp/auto-approve-safe.log` | Log file path |
+| `USAGE_LOG` | `/tmp/auto-approve-usage.log` | Per-call token usage log |
+| `USAGE_TOTALS` | `/tmp/auto-approve-usage-totals` | Running cumulative totals |
 | `--max-time 5` | 5s | curl timeout per provider |
 | `timeout` (in settings.json) | 12s | Max time Claude Code waits for the hook |
 

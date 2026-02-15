@@ -4,6 +4,8 @@ set -uo pipefail
 LOG="/tmp/auto-approve-safe.log"
 COOLOFF_DIR="/tmp/auto-approve-cooloff"
 COOLOFF_SECONDS=1800  # 30 minutes
+USAGE_LOG="/tmp/auto-approve-usage.log"
+USAGE_TOTALS="/tmp/auto-approve-usage-totals"
 
 mkdir -p "$COOLOFF_DIR"
 
@@ -29,6 +31,45 @@ set_cooloff() {
   local PROVIDER=$1
   local EXPIRES=$(( $(date +%s) + COOLOFF_SECONDS ))
   echo "$EXPIRES" > "$COOLOFF_DIR/$PROVIDER"
+}
+
+update_usage_stats() {
+  (
+    local PROVIDER=$1 MODEL=$2 PROMPT_TOK=$3 COMPLETION_TOK=$4 TOTAL_TOK=$5 INPUT_COST=$6 OUTPUT_COST=$7
+
+    # Per-call cost: (prompt_tokens * input_cost + completion_tokens * output_cost) / 1_000_000
+    local CALL_COST
+    CALL_COST=$(awk "BEGIN { printf \"%.6f\", ($PROMPT_TOK * $INPUT_COST + $COMPLETION_TOK * $OUTPUT_COST) / 1000000 }")
+
+    # Append to per-call usage log
+    echo "$(date '+%Y-%m-%dT%H:%M:%S') $PROVIDER $MODEL prompt=$PROMPT_TOK completion=$COMPLETION_TOK total=$TOTAL_TOK cost=\$$CALL_COST" >> "$USAGE_LOG"
+
+    # Update running totals atomically
+    local PREV_CALLS=0 PREV_PROMPT=0 PREV_COMPLETION=0 PREV_COST="0.000000"
+    if [ -f "$USAGE_TOTALS" ]; then
+      # shellcheck disable=SC1090
+      source "$USAGE_TOTALS"
+      PREV_CALLS=${TOTAL_CALLS:-0}
+      PREV_PROMPT=${TOTAL_PROMPT_TOKENS:-0}
+      PREV_COMPLETION=${TOTAL_COMPLETION_TOKENS:-0}
+      PREV_COST=${TOTAL_COST_USD:-0.000000}
+    fi
+
+    local NEW_CALLS=$(( PREV_CALLS + 1 ))
+    local NEW_PROMPT=$(( PREV_PROMPT + PROMPT_TOK ))
+    local NEW_COMPLETION=$(( PREV_COMPLETION + COMPLETION_TOK ))
+    local NEW_COST
+    NEW_COST=$(awk "BEGIN { printf \"%.6f\", $PREV_COST + $CALL_COST }")
+
+    local TMPFILE="${USAGE_TOTALS}.tmp.$$"
+    cat > "$TMPFILE" <<EOF
+TOTAL_CALLS=$NEW_CALLS
+TOTAL_PROMPT_TOKENS=$NEW_PROMPT
+TOTAL_COMPLETION_TOKENS=$NEW_COMPLETION
+TOTAL_COST_USD=$NEW_COST
+EOF
+    mv "$TMPFILE" "$USAGE_TOTALS"
+  ) 2>/dev/null || true
 }
 
 call_api() {
@@ -72,12 +113,12 @@ Reply with exactly one word: YES or NO"
   # Try providers in order, skipping rate-limited ones
   # Replace these with your own API keys and endpoints
   local PROVIDERS=(
-    "opencode|https://opencode.ai/zen/v1/chat/completions|YOUR_OPENCODE_API_KEY|kimi-k2.5-free"
-    "moonshot|https://api.moonshot.ai/v1/chat/completions|YOUR_MOONSHOT_API_KEY|kimi-k2.5"
+    "opencode|https://opencode.ai/zen/v1/chat/completions|YOUR_OPENCODE_API_KEY|kimi-k2.5-free|0|0"
+    "moonshot|https://api.moonshot.ai/v1/chat/completions|YOUR_MOONSHOT_API_KEY|kimi-k2.5|0.60|3.00"
   )
 
   for ENTRY in "${PROVIDERS[@]}"; do
-    IFS='|' read -r NAME URL KEY MODEL <<< "$ENTRY"
+    IFS='|' read -r NAME URL KEY MODEL INPUT_COST OUTPUT_COST <<< "$ENTRY"
 
     if is_cooled_off "$NAME"; then
       echo "  $NAME: skipped (cooloff)" >>"$LOG"
@@ -107,7 +148,18 @@ Reply with exactly one word: YES or NO"
 
     local CONTENT
     CONTENT=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
-    echo "  $NAME said: $CONTENT" >>"$LOG"
+
+    # Extract token usage
+    local PROMPT_TOKENS COMPLETION_TOKENS TOTAL_TOKENS
+    read -r PROMPT_TOKENS COMPLETION_TOKENS TOTAL_TOKENS <<< \
+      $(echo "$RESPONSE" | jq -r '[.usage.prompt_tokens // 0, .usage.completion_tokens // 0, .usage.total_tokens // 0] | @tsv' 2>/dev/null) \
+      || { PROMPT_TOKENS=0; COMPLETION_TOKENS=0; TOTAL_TOKENS=0; }
+
+    local CALL_COST
+    CALL_COST=$(awk "BEGIN { printf \"%.6f\", ($PROMPT_TOKENS * $INPUT_COST + $COMPLETION_TOKENS * $OUTPUT_COST) / 1000000 }" 2>/dev/null) || CALL_COST="0.000000"
+
+    echo "  $NAME said: $CONTENT (prompt=$PROMPT_TOKENS completion=$COMPLETION_TOKENS cost=\$$CALL_COST)" >>"$LOG"
+    update_usage_stats "$NAME" "$MODEL" "$PROMPT_TOKENS" "$COMPLETION_TOKENS" "$TOTAL_TOKENS" "$INPUT_COST" "$OUTPUT_COST"
 
     if echo "$CONTENT" | grep -qiw "NO"; then
       echo "  -> approve" >>"$LOG"

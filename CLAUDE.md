@@ -32,7 +32,9 @@ Debug log: `/tmp/auto-approve-safe.log`
 
 **Fail-safe:** Any failure (API error, timeout, unrecognizable response, all providers down) produces no output, which defaults to showing the permission prompt. The script never accidentally approves. This is the most important invariant — preserve it.
 
-**Provider system:** Providers are defined as `name|url|key|model` strings in the `PROVIDERS` array. Rate-limited providers enter a 30-minute cooloff tracked via timestamp files in `/tmp/auto-approve-cooloff/`. `call_api()` wraps curl calls to any OpenAI-compatible chat completions endpoint.
+**Provider system:** Providers are defined as `name|url|key|model|input_cost|output_cost` strings in the `PROVIDERS` array (costs in USD per million tokens). Rate-limited providers enter a 30-minute cooloff tracked via timestamp files in `/tmp/auto-approve-cooloff/`. `call_api()` wraps curl calls to any OpenAI-compatible chat completions endpoint.
+
+**Usage tracking:** Each successful API call logs token counts and cost to `/tmp/auto-approve-usage.log` (per-call detail) and updates running totals in `/tmp/auto-approve-usage-totals` (shell-sourceable). All usage tracking is wrapped in a subshell with `|| true` to preserve the fail-safe invariant.
 
 ## Key Design Decisions
 
