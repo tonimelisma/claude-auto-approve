@@ -87,14 +87,18 @@ call_api() {
 }
 
 classify() {
-  local TOOL_INPUT PROMPT
+  local TOOL_NAME TOOL_INPUT PROMPT
 
-  TOOL_INPUT=$(echo "$INPUT" | jq -r '.tool_input.command')
-  if [ $? -ne 0 ] || [ -z "$TOOL_INPUT" ]; then
-    return 1
-  fi
+  TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // "Bash"')
 
-  PROMPT="Analyze the following bash command.
+  case "$TOOL_NAME" in
+    Bash)
+      TOOL_INPUT=$(echo "$INPUT" | jq -r '.tool_input.command')
+      if [ $? -ne 0 ] || [ -z "$TOOL_INPUT" ]; then
+        return 1
+      fi
+
+      PROMPT="Analyze the following bash command.
 
 \`\`\`
 $TOOL_INPUT
@@ -105,6 +109,30 @@ Only answer YES for commands that could cause significant damage: deleting impor
 Routine operations like creating/removing temp files, installing packages, or restarting non-critical services do NOT need warnings.
 
 Reply with exactly one word: YES or NO"
+      ;;
+    WebFetch)
+      TOOL_INPUT=$(echo "$INPUT" | jq -r '.tool_input.url')
+      if [ $? -ne 0 ] || [ -z "$TOOL_INPUT" ]; then
+        return 1
+      fi
+
+      PROMPT="Analyze the following URL that an AI assistant wants to fetch:
+
+$TOOL_INPUT
+
+Is this URL potentially dangerous? Consider:
+- SSRF: internal/private network addresses (127.0.0.1, 10.x, 172.16-31.x, 192.168.x, localhost, .local)
+- Data exfiltration: sensitive data encoded in URL parameters
+- Known malicious domains or phishing/typosquatting of popular sites
+
+Most URLs to public websites, documentation sites, APIs, and content platforms are SAFE.
+
+Reply with exactly one word: YES or NO"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 
   # Try providers in order, skipping rate-limited ones
   # Replace these with your own API keys and endpoints

@@ -4,29 +4,41 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A Claude Code hook (`auto-approve-safe.sh`) that intercepts Bash permission requests and classifies commands as safe/dangerous using cheap LLM APIs. Safe commands are auto-approved; dangerous ones trigger the normal permission prompt.
+A Claude Code hook (`auto-approve-safe.sh`) that intercepts permission requests for Bash commands and WebFetch URLs, classifying them as safe/dangerous using cheap LLM APIs. Safe operations are auto-approved; dangerous ones trigger the normal permission prompt.
 
 Single Bash script. Requires `curl` and `jq`. No build system or package manager.
 
 ## Testing
 
-Test safe command (should output JSON with `"behavior": "allow"`):
+Test safe Bash command (should output JSON with `"behavior": "allow"`):
 ```bash
-echo '{"tool_input":{"command":"ls /tmp"}}' | ./auto-approve-safe.sh
+echo '{"tool_name":"Bash","tool_input":{"command":"ls /tmp"}}' | ./auto-approve-safe.sh
 ```
 
-Test dangerous command (should produce no output):
+Test dangerous Bash command (should produce no output):
 ```bash
-echo '{"tool_input":{"command":"rm -rf /"}}' | ./auto-approve-safe.sh
+echo '{"tool_name":"Bash","tool_input":{"command":"rm -rf /"}}' | ./auto-approve-safe.sh
 ```
+
+Test safe WebFetch URL (should output JSON with `"behavior": "allow"`):
+```bash
+echo '{"tool_name":"WebFetch","tool_input":{"url":"https://docs.python.org/3/library/json.html","prompt":"extract info"}}' | ./auto-approve-safe.sh
+```
+
+Test dangerous WebFetch URL (should produce no output):
+```bash
+echo '{"tool_name":"WebFetch","tool_input":{"url":"http://192.168.1.1/admin","prompt":"extract info"}}' | ./auto-approve-safe.sh
+```
+
+Note: Omitting `tool_name` defaults to `"Bash"` for backward compatibility.
 
 ## Architecture
 
-**Input:** JSON on stdin from Claude Code's `PermissionRequest` hook (`{"tool_input":{"command":"..."}}`).
+**Input:** JSON on stdin from Claude Code's `PermissionRequest` hook. Includes `tool_name` (`"Bash"` or `"WebFetch"`) and `tool_input` (`.command` for Bash, `.url` for WebFetch). Missing `tool_name` defaults to `"Bash"` for backward compatibility.
 
 **Output:** JSON with `behavior: "allow"` to auto-approve, or no output to trigger normal permission prompt.
 
-**Flow:** `classify()` extracts the command -> builds a classification prompt -> tries LLM providers in order -> first successful YES/NO response wins -> "NO" (not dangerous) = approve, "YES" (dangerous) = prompt.
+**Flow:** `classify()` reads `tool_name` -> extracts the relevant input (command or URL) -> builds a tool-specific classification prompt -> tries LLM providers in order -> first successful YES/NO response wins -> "NO" (not dangerous) = approve, "YES" (dangerous) = prompt. Unknown tool names fail-safe to prompt.
 
 **Fail-safe:** Any failure (API error, timeout, unrecognizable response, all providers down) produces no output, which defaults to showing the permission prompt. The script never accidentally approves. This is the most important invariant -- preserve it.
 
