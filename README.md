@@ -1,10 +1,10 @@
 # claude-auto-approve
 
-A Claude Code [hook](https://docs.anthropic.com/en/docs/claude-code/hooks) that automatically approves safe Bash commands using a cheap/free LLM API, so you only get permission prompts for potentially dangerous operations.
+A Claude Code [hook](https://docs.anthropic.com/en/docs/claude-code/hooks) that automatically approves safe Bash commands and WebFetch URLs using a cheap/free LLM API, so you only get permission prompts for potentially dangerous operations.
 
 ## How it works
 
-When Claude Code wants to run a Bash command, this hook intercepts the permission request and asks a cheap LLM whether the command could cause significant damage. Safe commands like `ls`, `git status`, or `cat` are auto-approved. Dangerous commands like `rm -rf`, `mkfs`, or `systemctl stop` trigger the normal permission prompt.
+When Claude Code wants to run a Bash command or fetch a URL, this hook intercepts the permission request and asks a cheap LLM whether the operation could cause harm. Safe commands like `ls`, `git status`, or `cat` and safe URLs like `https://docs.python.org` are auto-approved. Dangerous commands like `rm -rf` or dangerous URLs like `http://192.168.1.1/admin` trigger the normal permission prompt.
 
 ### Provider failover
 
@@ -19,9 +19,9 @@ If a provider returns a rate limit error, it enters a 30-minute cooloff period a
 
 If all providers fail, time out, or return an unrecognizable response, the hook outputs nothing — which tells Claude Code to show the normal permission prompt. You never accidentally approve a dangerous command due to an API error.
 
-### Classification prompt
+### Classification prompts
 
-The LLM is asked: "Should a system administrator be warned before running this command?" and must answer YES or NO. This framing scored 100% accuracy across 34 test commands covering both safe and dangerous operations.
+For **Bash commands**, the LLM is asked: "Should a system administrator be warned before running this command?" For **WebFetch URLs**, it checks for SSRF risks (private/internal IPs), data exfiltration patterns, and malicious domains. Both must answer YES or NO.
 
 ## Requirements
 
@@ -67,6 +67,16 @@ The LLM is asked: "Should a system administrator be warned before running this c
                "timeout": 12
              }
            ]
+         },
+         {
+           "matcher": "WebFetch",
+           "hooks": [
+             {
+               "type": "command",
+               "command": "$HOME/.claude/hooks/auto-approve-safe.sh",
+               "timeout": 12
+             }
+           ]
          }
        ]
      }
@@ -87,61 +97,60 @@ Costs are in USD per million tokens. Use `0|0` for free providers.
 
 The script tries providers in order and uses the first one that succeeds.
 
-## Debugging
-
-All classification decisions are logged to `/tmp/auto-approve-safe.log`:
-
-```
-20:01:15 classifying: ls /tmp
-  moonshot said: NO (prompt=1234 completion=5 cost=$0.000756)
-  -> approve
-20:01:21 classifying: rm -rf /srv/data
-  moonshot said: YES (prompt=1234 completion=5 cost=$0.000756)
-  -> prompt
-```
-
 ## Usage tracking
 
-Every successful API call is logged with token counts and cost estimates.
+All state lives under `~/.claude/auto-approve/`.
 
-**Running totals:**
-
-```bash
-cat /tmp/auto-approve-usage-totals
-```
-
-```
-TOTAL_CALLS=42
-TOTAL_PROMPT_TOKENS=5000
-TOTAL_COMPLETION_TOKENS=200
-TOTAL_COST_USD=0.009288
-```
-
-**Per-call detail:**
+**Per-call audit log:**
 
 ```bash
-tail -20 /tmp/auto-approve-usage.log
+tail -20 ~/.claude/auto-approve/usage.log
 ```
 
 ```
-2026-02-14T20:01:15 opencode kimi-k2.5-free prompt=1234 completion=5 total=1239 cost=$0.000000
-2026-02-14T20:01:18 moonshot kimi-k2.5 prompt=1234 completion=5 total=1239 cost=$0.000756
+2026-02-14T20:01:15 provider=opencode model=kimi-k2.5-free prompt_tokens=1234 completion_tokens=5 decision=approve command="ls /tmp"
+2026-02-14T20:01:18 provider=moonshot model=kimi-k2.5 prompt_tokens=1234 completion_tokens=5 decision=prompt command="rm -rf /"
 ```
 
-To reset usage stats: `rm /tmp/auto-approve-usage-totals /tmp/auto-approve-usage.log`
+**Per-provider cumulative totals** (shell-sourceable):
+
+```bash
+cat ~/.claude/auto-approve/totals/opencode
+```
+
+```
+CALLS=42
+PROMPT_TOKENS=5000
+COMPLETION_TOKENS=200
+COST_USD=0.00
+```
+
+To reset usage stats: `rm -rf ~/.claude/auto-approve/totals/ ~/.claude/auto-approve/usage.log`
 
 ## Testing
 
-Test a safe command (should output JSON with `"behavior": "allow"`):
+Test a safe Bash command (should output JSON with `"behavior": "allow"`):
 
 ```bash
-echo '{"tool_input":{"command":"ls /tmp"}}' | ~/.claude/hooks/auto-approve-safe.sh
+echo '{"tool_name":"Bash","tool_input":{"command":"ls /tmp"}}' | ~/.claude/hooks/auto-approve-safe.sh
 ```
 
-Test a dangerous command (should produce no output):
+Test a dangerous Bash command (should produce no output):
 
 ```bash
-echo '{"tool_input":{"command":"rm -rf /"}}' | ~/.claude/hooks/auto-approve-safe.sh
+echo '{"tool_name":"Bash","tool_input":{"command":"rm -rf /"}}' | ~/.claude/hooks/auto-approve-safe.sh
+```
+
+Test a safe WebFetch URL (should output JSON with `"behavior": "allow"`):
+
+```bash
+echo '{"tool_name":"WebFetch","tool_input":{"url":"https://docs.python.org/3/library/json.html","prompt":"extract info"}}' | ~/.claude/hooks/auto-approve-safe.sh
+```
+
+Test a dangerous WebFetch URL (should produce no output):
+
+```bash
+echo '{"tool_name":"WebFetch","tool_input":{"url":"http://192.168.1.1/admin","prompt":"extract info"}}' | ~/.claude/hooks/auto-approve-safe.sh
 ```
 
 ## Configuration
@@ -149,9 +158,7 @@ echo '{"tool_input":{"command":"rm -rf /"}}' | ~/.claude/hooks/auto-approve-safe
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `COOLOFF_SECONDS` | `1800` | How long to skip a rate-limited provider (seconds) |
-| `LOG` | `/tmp/auto-approve-safe.log` | Log file path |
-| `USAGE_LOG` | `/tmp/auto-approve-usage.log` | Per-call token usage log |
-| `USAGE_TOTALS` | `/tmp/auto-approve-usage-totals` | Running cumulative totals |
+| `DATA_DIR` | `~/.claude/auto-approve` | State directory for logs, totals, cooloff |
 | `--max-time 5` | 5s | curl timeout per provider |
 | `timeout` (in settings.json) | 12s | Max time Claude Code waits for the hook |
 
