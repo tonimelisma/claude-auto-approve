@@ -98,6 +98,27 @@ classify() {
         return 1
       fi
 
+      # Destructive git commands — always prompt, never auto-approve
+      case "$TOOL_INPUT" in
+        git\ reset\ *|git\ stash\ drop*|git\ stash\ clear*|\
+        git\ checkout\ --\ *|git\ checkout\ .*|\
+        git\ restore\ *|git\ clean\ *|\
+        git\ branch\ -D\ *|git\ branch\ -d\ -f\ *|\
+        git\ push\ --force*|git\ push\ -f\ *|\
+        git\ worktree\ remove\ --force*|git\ worktree\ remove\ -f\ *)
+          echo "prompt"
+          return 0
+          ;;
+      esac
+
+      # All other git commands are safe — auto-approve without LLM
+      case "$TOOL_INPUT" in
+        git\ *)
+          echo "approve"
+          return 0
+          ;;
+      esac
+
       PROMPT="Analyze the following bash command.
 
 \`\`\`
