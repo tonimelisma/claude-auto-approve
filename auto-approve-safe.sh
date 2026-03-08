@@ -98,12 +98,12 @@ classify() {
         return 1
       fi
 
-      # Destructive git commands — always prompt, never auto-approve
+      # Destructive git commands that bypass safety — always prompt
       case "$TOOL_INPUT" in
-        git\ reset\ *|git\ stash\ drop*|git\ stash\ clear*|\
-        git\ checkout\ --\ *|git\ checkout\ .*|\
-        git\ restore\ *|git\ clean\ *|\
-        git\ branch\ -D\ *|git\ branch\ -d\ -f\ *|\
+        git\ reset\ --hard*|\
+        git\ checkout\ --\ *|\
+        git\ clean\ *-f*|\
+        git\ stash\ drop*|git\ stash\ clear*|\
         git\ push\ --force*|git\ push\ -f\ *|\
         git\ worktree\ remove\ --force*|git\ worktree\ remove\ -f\ *)
           echo "prompt"
